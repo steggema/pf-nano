@@ -34,11 +34,16 @@ parser.add_option('--norm_factor', dest='norm_factor',
                   help='Divide pT/energy variables by this factor', default=50.)
 parser.add_option('--compression', dest='compression',
                   help='compression', default='gzip')
+parser.add_option('--test', dest='test', help='Test mode processing 1000 events',
+                  default=False, action='store_true')
 
 (opt, args) = parser.parse_args()
 
 if opt.input == '' or opt.output == '':
     sys.exit('Need to specify input and output files!')
+
+if opt.compression in ['None', 'none']:
+    opt.compression = None
 
 met_flavours = ['',  'Chs', 'NoPU', 'Puppi', 'PU', 'PUCorr', 'Raw'] #'Calo', 'Tk'
 met_branches = [
@@ -55,6 +60,10 @@ other_branches = ['nJet', 'Jet_pt', 'Jet_eta', 'Jet_phi', 'Jet_mass',
 upfile = uproot.open(opt.input)
 
 tree = upfile['Events'].arrays(met_branches + other_branches)
+
+if opt.test:
+    for branch in tree.keys():
+        tree[branch] = tree[branch][0:1000]
 
 # normalisation and other transformations (none for the time being since
 # everything looks reasonably regular)
@@ -149,6 +158,7 @@ if not opt.nopf:
     tree[b'PF_py'] = np.sin(tree[b'PF_phi']) * tree[b'PF_pt']
     pf_keys += [b'PF_px', b'PF_py']
     pf_keys = [key for key in pf_keys if key not in [b'PF_phi', b'PF_puppiWeightNoLep']] ##, b'PF_pt' <-- this may still help, e.g. for weighting in certain phase space
+    print('PF keys', pf_keys)
     pf_keys_categorical = [b'PF_charge', b'PF_pdgId', b'PF_fromPV']
     for key in pf_keys_categorical:
         if key not in d_embedding:
@@ -164,6 +174,7 @@ if not opt.nopf:
 
 
     pf_keys = [key for key in pf_keys if key not in pf_keys_categorical]
+    print('Final PF keys', pf_keys)
     X = np.stack([tree[key] for key in pf_keys], axis=2)
     for key in pf_keys:
         tree[key] = None
@@ -180,10 +191,11 @@ def nonify_first(shape):
 if not opt.append or not os.path.isfile(opt.output):
     with h5py.File(opt.output, 'w') as h5f:
         if not opt.nopf:
-            h5f.create_dataset('X', data=X, compression=opt.compression, chunks=256, maxshape=nonify_first(X.shape))
-            h5f.create_dataset('X_c', data=X_c, compression=opt.compression, chunks=256, maxshape=nonify_first(X.shape))
-        h5f.create_dataset('Y', data=Y, compression=opt.compression, chunks=256, maxshape=nonify_first(Y.shape))
-        h5f.create_dataset('Z', data=Z, compression=opt.compression, chunks=256, maxshape=nonify_first(Z.shape))
+            h5f.create_dataset('X', data=X, compression=opt.compression, chunks=(256, maxNPF, X.shape[2]), maxshape=nonify_first(X.shape))
+            for i in range(X_c.shape[2]):
+                h5f.create_dataset(f'X_c_{i}', data=X_c[...,i][..., None], compression=opt.compression, chunks=(256, maxNPF, 1), maxshape=nonify_first(X.shape))
+        h5f.create_dataset('Y', data=Y, compression=opt.compression, chunks=(256, Y.shape[1]), maxshape=nonify_first(Y.shape))
+        h5f.create_dataset('Z', data=Z, compression=opt.compression, chunks=(256, Z.shape[1]), maxshape=nonify_first(Z.shape))
         print('Finished')
         print(Y.shape)
         print(Z.shape)
@@ -192,8 +204,9 @@ else:
         if not opt.nopf:
             h5f['X'].resize(h5f['X'].shape[0] + X.shape[0], axis=0)
             h5f['X'][-X.shape[0]:] = X
-            h5f['X_c'].resize(h5f['X_c'].shape[0] + X_c.shape[0], axis=0)
-            h5f['X_c'][-X_c.shape[0]:] = X_c
+            for i in range(X_c.shape[2]):
+                h5f[f'X_c_{i}'].resize(h5f[f'X_c_{i}'].shape[0] + X_c.shape[0], axis=0)
+                h5f[f'X_c_{i}'][-X_c.shape[0]:] = X_c[..., i][..., None]
 
         h5f['Y'].resize(h5f['Y'].shape[0] + Y.shape[0], axis=0)
         h5f['Y'][-Y.shape[0]:] = Y
