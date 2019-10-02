@@ -36,6 +36,8 @@ parser.add_option('--compression', dest='compression',
                   help='compression', default='gzip')
 parser.add_option('--test', dest='test', help='Test mode processing 1000 events',
                   default=False, action='store_true')
+parser.add_option('--jets', dest='jets', help='Add jets',
+                  default=False, action='store_true')
 
 (opt, args) = parser.parse_args()
 
@@ -50,6 +52,7 @@ met_branches = [
     m+t for m, t in itertools.product(met_flavours, ['MET_phi', 'MET_pt', 'MET_sumEt'])]
 
 other_branches = ['nJet', 'Jet_pt', 'Jet_eta', 'Jet_phi', 'Jet_mass',
+                  'nGenJet', 'GenJet_pt', 'GenJet_eta', 'GenJet_phi', 'GenJet_mass',
                   'fixedGridRhoFastjetAll', 'fixedGridRhoFastjetCentralCalo',
                   'nMuon', 'Muon_tightId', 'Muon_pt', 'Muon_eta', 'Muon_phi', 'Muon_pfRelIso03_all',
                   'nElectron', 'Electron_mvaFall17V2Iso_WP80', 'Electron_pt', 'Electron_eta', 'Electron_phi',
@@ -156,6 +159,11 @@ if not opt.nopf:
         np.nan_to_num(tree[key], copy=False)
     tree[b'PF_px'] = np.cos(tree[b'PF_phi']) * tree[b'PF_pt']
     tree[b'PF_py'] = np.sin(tree[b'PF_phi']) * tree[b'PF_pt']
+    if opt.jets:
+        tree[b'PF_energy'] = np.sqrt(np.maximum(0., (tree[b'PF_pt']*np.cosh(tree[b'PF_eta']))**2 + tree[b'PF_mass']**2))
+        tree[b'PF_pz'] = tree[b'PF_pt']*np.sinh(tree[b'PF_eta'])
+        # Add pz and energy
+        pf_keys += [b'PF_energy', b'PF_pz']
     pf_keys += [b'PF_px', b'PF_py']
     pf_keys = [key for key in pf_keys if key not in [b'PF_phi', b'PF_puppiWeightNoLep']] ##, b'PF_pt' <-- this may still help, e.g. for weighting in certain phase space
     print('PF keys', pf_keys)
@@ -183,7 +191,46 @@ if not opt.nopf:
     # X[np.where(np.abs(X) > 1e+6)] = 0. # Remove outliers
     print('Shape of X', X.shape)
 
+if opt.jets:
+    maxNJets = 25
 
+    for key in [b'Jet_pt', b'Jet_eta', b'Jet_mass', b'Jet_phi']:
+        tree[key] = tree[key].pad(maxNJets)
+        try:
+            the_list = tree[key].tolist()
+            tree[key] = np.asarray(the_list, dtype=float)
+            np.nan_to_num(tree[key], copy=False)
+        except ValueError:
+            import pdb; pdb.set_trace()
+
+    tree[b'Jet_energy'] = np.sqrt(np.maximum(0., (tree[b'Jet_pt']*np.cosh(tree[b'Jet_eta']))**2 + tree[b'Jet_mass']**2))
+    tree[b'Jet_pz'] = tree[b'Jet_pt']*np.sinh(tree[b'Jet_eta'])
+    tree[b'Jet_px'] = np.cos(tree[b'Jet_phi']) * tree[b'Jet_pt']
+    tree[b'Jet_py'] = np.sin(tree[b'Jet_phi']) * tree[b'Jet_pt']
+
+
+    jet_keys = [b'Jet_px', b'Jet_py', b'Jet_pz', b'Jet_energy']
+
+    X_jet = np.stack([tree[key] for key in jet_keys], axis=2)
+
+    for key in [b'GenJet_pt', b'GenJet_eta', b'GenJet_mass', b'GenJet_phi']:
+        tree[key] = tree[key].pad(maxNJets)
+        try:
+            the_list = tree[key].tolist()
+            tree[key] = np.asarray(the_list, dtype=float)
+            np.nan_to_num(tree[key], copy=False)
+        except ValueError:
+            import pdb; pdb.set_trace()
+
+
+    tree[b'GenJet_energy'] = np.sqrt(np.maximum(0., (tree[b'GenJet_pt']*np.cosh(tree[b'GenJet_eta']))**2 + tree[b'GenJet_mass']**2))
+    tree[b'GenJet_pz'] = tree[b'GenJet_pt']*np.sinh(tree[b'GenJet_eta'])
+    tree[b'GenJet_px'] = np.cos(tree[b'GenJet_phi']) * tree[b'GenJet_pt']
+    tree[b'GenJet_py'] = np.sin(tree[b'GenJet_phi']) * tree[b'GenJet_pt']
+
+    gen_jet_keys = [b'GenJet_px', b'GenJet_py', b'GenJet_pz', b'GenJet_energy']
+
+    X_gen_jet = np.stack([tree[key] for key in gen_jet_keys], axis=2)
 
 def nonify_first(shape):
     return tuple([None if i == 0 else el for i, el in enumerate(shape)])
@@ -196,6 +243,9 @@ if not opt.append or not os.path.isfile(opt.output):
                 h5f.create_dataset(f'X_c_{i}', data=X_c[...,i][..., None], compression=opt.compression, chunks=(256, maxNPF, 1), maxshape=nonify_first(X.shape))
         h5f.create_dataset('Y', data=Y, compression=opt.compression, chunks=(256, Y.shape[1]), maxshape=nonify_first(Y.shape))
         h5f.create_dataset('Z', data=Z, compression=opt.compression, chunks=(256, Z.shape[1]), maxshape=nonify_first(Z.shape))
+        if opt.jets:
+            h5f.create_dataset('X_jet', data=X_jet, compression=opt.compression, chunks=(256, X_jet.shape[1], X_jet.shape[2]), maxshape=nonify_first(X_jet.shape))
+            h5f.create_dataset('X_gen_jet', data=X_gen_jet, compression=opt.compression, chunks=(256, X_gen_jet.shape[1], X_gen_jet.shape[2]), maxshape=nonify_first(X_gen_jet.shape))
         print('Finished')
         print(Y.shape)
         print(Z.shape)
