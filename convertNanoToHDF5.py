@@ -30,6 +30,8 @@ parser.add_option('--append', dest='append',
                   help='Append to existing file', default=False, action='store_true')
 parser.add_option('--n_leptons', dest='n_leptons',
                   help='How many ID/iso muons + electrons are required', default=2)
+parser.add_option('--n_leptons_subtract', dest='n_leptons_subtract',
+                  help='How many of the ID/iso muons + electrons to subtract from the METs and PFCandidate list', default=2)
 parser.add_option('--norm_factor', dest='norm_factor',
                   help='Divide pT/energy variables by this factor', default=50.)
 parser.add_option('--compression', dest='compression',
@@ -37,6 +39,10 @@ parser.add_option('--compression', dest='compression',
 parser.add_option('--test', dest='test', help='Test mode processing 1000 events',
                   default=False, action='store_true')
 parser.add_option('--jets', dest='jets', help='Add jets',
+                  default=False, action='store_true')
+parser.add_option('--n_max', dest='n_max', help='Maximum number of events',
+                  default=-1)
+parser.add_option('--data', dest='data', help='Process data',
                   default=False, action='store_true')
 
 (opt, args) = parser.parse_args()
@@ -47,22 +53,31 @@ if opt.input == '' or opt.output == '':
 if opt.compression in ['None', 'none']:
     opt.compression = None
 
-met_flavours = ['',  'Chs', 'NoPU', 'Puppi', 'PU', 'PUCorr', 'Raw'] #'Calo', 'Tk'
+opt.n_leptons = int(opt.n_leptons)
+opt.n_leptons_subtract = int(opt.n_leptons_subtract)
+
+# met_flavours = ['',  'Chs', 'NoPU', 'Puppi', 'PU', 'PUCorr', 'Raw'] #'Calo', 'Tk'
+met_flavours = ['',  'Puppi', 'Raw'] #'Calo', 'Tk'
 met_branches = [
     m+t for m, t in itertools.product(met_flavours, ['MET_phi', 'MET_pt', 'MET_sumEt'])]
 
-other_branches = ['nJet', 'Jet_pt', 'Jet_eta', 'Jet_phi', 'Jet_mass',
-                  'nGenJet', 'GenJet_pt', 'GenJet_eta', 'GenJet_phi', 'GenJet_mass',
-                  'fixedGridRhoFastjetAll', 'fixedGridRhoFastjetCentralCalo',
-                  'nMuon', 'Muon_tightId', 'Muon_pt', 'Muon_eta', 'Muon_phi', 'Muon_pfRelIso03_all',
-                  'nElectron', 'Electron_mvaFall17V2Iso_WP80', 'Electron_pt', 'Electron_eta', 'Electron_phi',
-                  'nPF', 'PF_*',
-                  'GenMET_pt', 'GenMET_phi'
+other_branches = ['fixedGridRhoFastjetAll', 'fixedGridRhoFastjetCentralCalo',
+                  'nMuon', 'Muon_tightId', 'Muon_pt', 'Muon_eta', 'Muon_phi', 'Muon_mass', 'Muon_pfRelIso03_all',
+                  'nElectron', 'Electron_mvaFall17V2Iso_WP80', 'Electron_pt', 'Electron_eta', 'Electron_phi', 'Electron_mass',
+                  'nPF', 'PF_*'
                  ]
+
+if opt.jets:
+    other_branches += ['nJet', 'Jet_pt', 'Jet_eta', 'Jet_phi', 'Jet_mass']
+
+if not opt.data:
+    other_branches += ['GenMET_pt', 'GenMET_phi']
+    if opt.jets:
+        other_branches += ['nGenJet', 'GenJet_pt', 'GenJet_eta', 'GenJet_phi', 'GenJet_mass']
 
 upfile = uproot.open(opt.input)
 
-tree = upfile['Events'].arrays(met_branches + other_branches)
+tree = upfile['Events'].arrays(met_branches + other_branches, entrystop=int(opt.n_max))
 
 if opt.test:
     for branch in tree.keys():
@@ -92,22 +107,48 @@ tree[b'nLepton'] = tree[b'nMuon'] + tree[b'nElectron']
 tree[b'Lepton_phi'] = np.stack([tree[b'Muon_phi'], tree[b'Electron_phi']], axis=1)
 tree[b'Lepton_eta'] = np.stack([tree[b'Muon_eta'], tree[b'Electron_eta']], axis=1)
 tree[b'Lepton_pt'] = np.stack([tree[b'Muon_pt'], tree[b'Electron_pt']], axis=1)
+tree[b'Lepton_mass'] = np.stack([tree[b'Muon_mass'], tree[b'Electron_mass']], axis=1)
 
 tree = {k:v[tree[b'nLepton'] == opt.n_leptons] for k, v in tree.items()}
 
-for key in [b'Lepton_phi', b'Lepton_eta', b'Lepton_pt']:
+print(opt.n_leptons, 'lepton requirement applied')
+
+for key in [b'Lepton_phi', b'Lepton_eta', b'Lepton_pt', b'Lepton_mass']:
     for i in range(len(tree[key])):
         tree[key][i] = np.concatenate(tree[key][i])
     tree[key] = tree[key].astype(np.float32)
 
+
+
+if opt.data:
+    lepton_px = np.cos(tree[b'Lepton_phi']) * tree[b'Lepton_pt']
+    lepton_py = np.sin(tree[b'Lepton_phi']) * tree[b'Lepton_pt']
+
+    dimuon_px = sum(lepton_px[:, i] for i in range(opt.n_leptons_subtract)) if opt.n_leptons_subtract else 0.#  lepton_px[:,1] + lepton_px[:,0]
+    dimuon_py = sum(lepton_py[:, i] for i in range(opt.n_leptons_subtract)) if opt.n_leptons_subtract else 0.
+    lepton_energy = np.sqrt(np.maximum(0., (tree[b'Lepton_pt']*np.cosh(tree[b'Lepton_eta']))**2 + tree[b'Lepton_mass']**2))
+    lepton_pz = tree[b'Lepton_pt']*np.sinh(tree[b'Lepton_eta'])
+    dimuon_pz = sum(lepton_pz[:, i] for i in range(opt.n_leptons_subtract))if opt.n_leptons_subtract else 0.
+    dimuon_energy = sum(lepton_energy[:, i] for i in range(opt.n_leptons_subtract))if opt.n_leptons_subtract else 0.
+
+    dimuon_mass = np.sqrt(dimuon_energy**2 - dimuon_pz**2 - dimuon_py**2 - dimuon_px**2)
+    z_mass = np.logical_and(dimuon_mass > 80./opt.norm_factor, dimuon_mass < 100./opt.norm_factor)
+    dimuon_pt = np.sqrt(dimuon_px**2 + dimuon_py**2)
+    z_mass_pt = np.logical_and(z_mass, dimuon_pt < 100./opt.norm_factor)
+    tree = {k:v[z_mass_pt] for k, v in tree.items()}
+
 lepton_px = np.cos(tree[b'Lepton_phi']) * tree[b'Lepton_pt']
 lepton_py = np.sin(tree[b'Lepton_phi']) * tree[b'Lepton_pt']
 
-dimuon_px = sum(lepton_px[:,i] for i in range(opt.n_leptons)) #  lepton_px[:,1] + lepton_px[:,0]
-dimuon_py = sum(lepton_py[:,i] for i in range(opt.n_leptons))
+dimuon_px = sum(lepton_px[:, i] for i in range(opt.n_leptons_subtract)) if opt.n_leptons_subtract else 0.#  lepton_px[:,1] + lepton_px[:,0]
+dimuon_py = sum(lepton_py[:, i] for i in range(opt.n_leptons_subtract)) if opt.n_leptons_subtract else 0.
 
-dimuon_plus_met_px = dimuon_px + np.cos(tree[b'GenMET_phi']) * tree[b'GenMET_pt']
-dimuon_plus_met_py = dimuon_py + np.sin(tree[b'GenMET_phi']) * tree[b'GenMET_pt']
+if opt.data:
+    dimuon_plus_met_px = dimuon_px
+    dimuon_plus_met_py = dimuon_py
+else:
+    dimuon_plus_met_px = np.cos(tree[b'GenMET_phi']) * tree[b'GenMET_pt'] + dimuon_px
+    dimuon_plus_met_py = np.sin(tree[b'GenMET_phi']) * tree[b'GenMET_pt'] + dimuon_py
 
 Y = np.stack([dimuon_plus_met_px, dimuon_plus_met_py], axis=1)
 
@@ -129,10 +170,10 @@ event_vars += [b'fixedGridRhoFastjetAll', b'fixedGridRhoFastjetCentralCalo']
 Z = np.stack([tree[ev_var] for ev_var in event_vars], axis=1)
 
 if not opt.nopf:
-    # Remove PF candidates corresponding to the two muons
-    for i_muon in range(opt.n_leptons):
-        dphi = tree[b'PF_phi'] - tree[b'Lepton_phi'][:,i_muon]
-        deta2 = (tree[b'PF_eta'] - tree[b'Lepton_eta'][:,i_muon])**2
+    print('Remove PF candidates corresponding to the two muons')
+    for i_muon in range(opt.n_leptons_subtract):
+        dphi = tree[b'PF_phi'] - tree[b'Lepton_phi'][:, i_muon]
+        deta2 = (tree[b'PF_eta'] - tree[b'Lepton_eta'][:, i_muon])**2
         dphi = dphi - 2*np.pi * (dphi > np.pi) + 2*np.pi * (dphi < -np.pi)
         dr2 = dphi**2 + deta2
 
@@ -147,6 +188,8 @@ if not opt.nopf:
     maxNPF = 4500
 
     maxEntries = len(tree[b'nPF'])
+
+    print('Prepare PF tree with', maxNPF, 'entries')
 
     pf_keys = [b for b in tree.keys() if b.startswith(b'PF')]
     for key in pf_keys:
@@ -165,7 +208,7 @@ if not opt.nopf:
         # Add pz and energy
         pf_keys += [b'PF_energy', b'PF_pz']
     pf_keys += [b'PF_px', b'PF_py']
-    pf_keys = [key for key in pf_keys if key not in [b'PF_phi', b'PF_puppiWeightNoLep']] ##, b'PF_pt' <-- this may still help, e.g. for weighting in certain phase space
+    pf_keys = [key for key in pf_keys if key not in [b'PF_phi', b'PF_puppiWeightNoLep', b'PF_PFIdx']] ##, b'PF_pt' <-- this may still help, e.g. for weighting in certain phase space
     print('PF keys', pf_keys)
     pf_keys_categorical = [b'PF_charge', b'PF_pdgId', b'PF_fromPV']
     for key in pf_keys_categorical:
